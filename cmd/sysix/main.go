@@ -17,7 +17,17 @@ func main() {
 
 	switch args[0] {
 	case "status":
-		showProcs := len(args) > 1 && args[1] == "--procs"
+		showProcs := false
+		showPorts := false
+		for _, arg := range args[1:] {
+			if arg == "--procs" {
+				showProcs = true
+			}
+			if arg == "--ports" {
+				showPorts = true
+			}
+		}
+
 		snapshot, err := collector.GetSnapshot()
 		if err != nil {
 			fmt.Println("error collecting system data:", err)
@@ -39,6 +49,21 @@ func main() {
 				}
 			}
 		}
+
+		if showPorts {
+			ports, err := collector.GetPorts()
+			if err != nil {
+				fmt.Println("error collecting ports:", err)
+			} else {
+				fmt.Println("\n--- Open Ports ---")
+				fmt.Printf("%-8s %-6s %-8s %s\n", "Port", "Type", "Status", "PID")
+				fmt.Println("--------------------------------")
+				for _, p := range ports {
+					fmt.Printf("%-8d %-6s %-8s %d\n", p.Port, p.Type, p.Status, p.PID)
+				}
+			}
+		}
+
 	case "watch":
 		fmt.Println("sysix watch (TUI) - not yet implemented")
 	case "serve":
@@ -58,6 +83,7 @@ welcome to sysix observer 0.3
 Usage:
   sysix status            snapshot of your system right now
   sysix status --procs    include running processes
+  sysix status --ports    include open ports
   sysix watch             launch the live TUI
   sysix serve             launch the web UI
   sysix help              show this help message
