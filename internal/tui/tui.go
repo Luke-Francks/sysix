@@ -8,7 +8,17 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+const logo = ` ______________.___. _________._______  ___
+ /   _____/\__  |   |/   _____/|   \   \/  /
+ \_____  \  /   |   |\_____  \ |   |\     / 
+ /        \ \____   |/        \|   |/     \ 
+/_______  / / ______/_______  /|___/___/\  \
+        \/  \/              \/           \_/`
+
 var (
+	logoStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("6"))
+
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("6")).
@@ -57,7 +67,7 @@ func (m model) View() string {
 
 	s := m.snapshot
 
-	content := titleStyle.Render("sysix observer") + "\n"
+	content := titleStyle.Render("observer") + "\n"
 	content += labelStyle.Render("Host:   ") + valueStyle.Render(fmt.Sprintf("%s (%s)", s.Hostname, s.OS)) + "\n"
 	content += labelStyle.Render("Uptime: ") + valueStyle.Render(fmt.Sprintf("%d hours", s.Uptime/3600)) + "\n"
 	content += labelStyle.Render("CPU:    ") + valueStyle.Render(fmt.Sprintf("%.1f%%", s.CPUPercent)) + "\n"
@@ -65,11 +75,11 @@ func (m model) View() string {
 	content += labelStyle.Render("Disk:   ") + valueStyle.Render(fmt.Sprintf("%.1f%% (%d GB / %d GB)", s.DiskPercent, s.DiskUsed/1024/1024/1024, s.DiskTotal/1024/1024/1024)) + "\n"
 	content += "\n" + labelStyle.Render("press q to quit")
 
-	return borderStyle.Render(content)
+	return logoStyle.Render(logo) + "\n" + borderStyle.Render(content)
 }
 
 func Start() error {
-	p := tea.NewProgram(initialModel())
+	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
 	_, err := p.Run()
 	return err
 }
