@@ -3,7 +3,7 @@ package tui
 import (
 	"fmt"
 
-	"github.com/Luke-Francks/sysix/internal/collector"
+	"github.com/System9-Software/sysix/internal/collector"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )

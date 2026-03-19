@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Luke-Francks/sysix/internal/collector"
-	"github.com/Luke-Francks/sysix/internal/tui"
+	"github.com/System9-Software/sysix/internal/collector"
+	"github.com/System9-Software/sysix/internal/tui"
 )
 
 func main() {

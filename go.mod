@@ -1,4 +1,4 @@
-module github.com/Luke-Francks/sysix
+module github.com/System9-Software/sysix
 
 go 1.26.1
 
