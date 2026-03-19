@@ -16,22 +16,28 @@ const logo = ` ______________.___. _________._______  ___
         \/  \/              \/           \_/`
 
 var (
+	colorAccent = lipgloss.Color("#4DA8FF")
+	colorText   = lipgloss.Color("#E8F0FF")
+	colorMuted  = lipgloss.Color("#6B7C99")
+	colorBorder = lipgloss.Color("#1E2D45")
+
 	logoStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("6"))
+			Foreground(colorAccent)
 
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("6")).
+			Foreground(colorAccent).
 			PaddingBottom(1)
 
 	labelStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("8"))
+			Foreground(colorMuted)
 
 	valueStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("15"))
+			Foreground(colorText)
 
 	borderStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorBorder).
 			Padding(1, 2)
 )
 
