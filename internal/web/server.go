@@ -779,6 +779,7 @@ function setBar(id, pct) {
 }
 
 function navTo(page) {
+  const btn = document.querySelector('[onclick*="showPage(\'' + page + '\'"]');
   if (btn) showPage(page, btn);
 }
 
