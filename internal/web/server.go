@@ -210,13 +210,6 @@ const dashboard = `<!DOCTYPE html>
   .nav-item:hover { background: rgba(77,168,255,0.06); color: var(--text); }
   .nav-item.active { background: rgba(77,168,255,0.12); color: var(--accent); }
 
-  .nav-icon {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.75rem;
-    width: 18px;
-    opacity: 0.8;
-  }
-
   .nav-badge {
     margin-left: auto;
     color: white;
@@ -637,30 +630,30 @@ const dashboard = `<!DOCTYPE html>
   </div>
   <nav class="sidebar-nav">
     <button class="nav-item active" onclick="showPage('overview', this)">
-      <span class="nav-icon">[*]</span> Overview
+      Overview
     </button>
     <button class="nav-item" onclick="showPage('processes', this)">
-      <span class="nav-icon">[>]</span> Processes
+      Processes
     </button>
     <button class="nav-item" onclick="showPage('ports', this)">
-      <span class="nav-icon">[~]</span> Ports
+      Ports
     </button>
     <button class="nav-item" onclick="showPage('network', this)">
-      <span class="nav-icon">[-]</span> Network
+      Network
     </button>
     <button class="nav-item" onclick="showPage('system', this)">
-      <span class="nav-icon">[#]</span> System
+      System
     </button>
     <button class="nav-item" onclick="showPage('analysis', this)">
-      <span class="nav-icon">[^]</span> Analysis
+      Analysis
       <span class="nav-badge" id="analysis-badge">0</span>
     </button>
     <button class="nav-item" id="nav-maintenance" onclick="showPage('maintenance', this)">
-      <span class="nav-icon">[!]</span> Maintenance
+      Maintenance
       <span class="nav-badge" id="maint-badge">0</span>
     </button>
     <button class="nav-item" onclick="showPage('settings', this)">
-      <span class="nav-icon">[+]</span> Settings
+      Settings
     </button>
   </nav>
   <div class="sidebar-footer">
@@ -744,6 +737,8 @@ const dashboard = `<!DOCTYPE html>
     <div class="page-header">Network</div>
     <div class="card">
       <div class="card-title">I/O Statistics</div>
+      <div class="stat-row"><span class="stat-label">Download Speed</span><span class="stat-value" id="net-down-speed">—</span></div>
+      <div class="stat-row"><span class="stat-label">Upload Speed</span><span class="stat-value" id="net-up-speed">—</span></div>
       <div class="stat-row"><span class="stat-label">Total Sent</span><span class="stat-value" id="net-sent">—</span></div>
       <div class="stat-row"><span class="stat-label">Total Received</span><span class="stat-value" id="net-recv">—</span></div>
       <div class="stat-row"><span class="stat-label">Packets Out</span><span class="stat-value" id="net-pkts-out">—</span></div>
@@ -859,6 +854,10 @@ function showPage(name, el) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById('page-' + name).classList.add('active');
   el.classList.add('active');
+  if (name === 'system') {
+    // Re-render after the page becomes visible so canvas width is valid.
+    setTimeout(refreshSystem, 0);
+  }
 }
 
 function fillClass(pct) {
@@ -872,6 +871,10 @@ function formatBytes(b) {
   if (b >= 1e6) return (b/1e6).toFixed(1) + ' MB';
   if (b >= 1e3) return (b/1e3).toFixed(1) + ' KB';
   return b + ' B';
+}
+
+function formatRate(bytesPerSecond) {
+  return formatBytes(bytesPerSecond) + '/s';
 }
 
 function setBar(id, pct) {
@@ -1040,6 +1043,8 @@ async function runMaintenance() {
   } catch(e) { console.error(e); }
 }
 
+let prevNetworkSample = null;
+
 async function refresh() {
   try {
     const [snap, net, ports] = await Promise.all([
@@ -1064,6 +1069,22 @@ async function refresh() {
     document.getElementById('net-recv').textContent = formatBytes(net.BytesRecv);
     document.getElementById('net-pkts-out').textContent = net.PacketsSent;
     document.getElementById('net-pkts-in').textContent = net.PacketsRecv;
+    const now = Date.now();
+    if (prevNetworkSample) {
+      const elapsedSec = Math.max((now - prevNetworkSample.ts) / 1000, 0.001);
+      const upBps = Math.max((net.BytesSent - prevNetworkSample.bytesSent) / elapsedSec, 0);
+      const downBps = Math.max((net.BytesRecv - prevNetworkSample.bytesRecv) / elapsedSec, 0);
+      document.getElementById('net-up-speed').textContent = formatRate(upBps);
+      document.getElementById('net-down-speed').textContent = formatRate(downBps);
+    } else {
+      document.getElementById('net-up-speed').textContent = '—';
+      document.getElementById('net-down-speed').textContent = '—';
+    }
+    prevNetworkSample = {
+      bytesSent: net.BytesSent,
+      bytesRecv: net.BytesRecv,
+      ts: now,
+    };
     document.getElementById('procs').innerHTML = snap.Processes.filter(p => p.MemMB > 1).slice(0, 20).map(p => '<tr><td>'+p.PID+'</td><td>'+p.Name+'</td><td>'+p.CPUPercent.toFixed(1)+'%</td><td>'+p.MemMB.toFixed(0)+' MB</td></tr>').join('');
     document.getElementById('ports').innerHTML = ports.slice(0, 20).map(p => '<tr><td>'+p.Port+'</td><td>'+p.Type+'</td><td>'+p.Status+'</td><td>'+p.PID+'</td></tr>').join('');
     const alerts = analyzeSystem(snap, ports);
