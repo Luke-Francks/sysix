@@ -38,12 +38,20 @@ type ObserverConfig struct {
 	Agents       []ObserverAgent `yaml:"agents"`
 }
 
+type HistoryConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	DBPath        string `yaml:"db_path"`
+	RetentionDays int    `yaml:"retention_days"`
+	APIPoints     int    `yaml:"api_points"`
+}
+
 type Config struct {
 	RefreshRate int            `yaml:"refresh_rate"`
 	Panels      PanelConfig    `yaml:"panels"`
 	Web         WebConfig      `yaml:"web"`
 	Agent       AgentConfig    `yaml:"agent"`
 	Observer    ObserverConfig `yaml:"observer"`
+	History     HistoryConfig  `yaml:"history"`
 }
 
 func Default() *Config {
@@ -70,6 +78,12 @@ func Default() *Config {
 			PollInterval: 2,
 			Agents:       []ObserverAgent{},
 		},
+		History: HistoryConfig{
+			Enabled:       true,
+			DBPath:        "sysix-history.db",
+			RetentionDays: 7,
+			APIPoints:     60,
+		},
 	}
 }
 
@@ -86,4 +100,12 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func Save(cfg *Config) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile("config.yaml", data, 0o644)
 }

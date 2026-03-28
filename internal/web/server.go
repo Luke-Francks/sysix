@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/System9-Software/sysix/internal/analyzer"
 	"github.com/System9-Software/sysix/internal/collector"
+	"github.com/System9-Software/sysix/internal/config"
+	"github.com/System9-Software/sysix/internal/metricstore"
 )
 
 type HistoryPoint struct {
@@ -43,6 +46,21 @@ type hostData struct {
 	History  []HistoryPoint
 }
 
+type quickSettings struct {
+	RefreshRate          int                `json:"refresh_rate"`
+	WebEnabled           bool               `json:"web_enabled"`
+	WebPort              int                `json:"web_port"`
+	AgentEnabled         bool               `json:"agent_enabled"`
+	AgentPort            int                `json:"agent_port"`
+	ObserverEnabled      bool               `json:"observer_enabled"`
+	ObserverPollInterval int                `json:"observer_poll_interval"`
+	HistoryEnabled       bool               `json:"history_enabled"`
+	HistoryDBPath        string             `json:"history_db_path"`
+	HistoryRetentionDays int                `json:"history_retention_days"`
+	HistoryAPIPoints     int                `json:"history_api_points"`
+	Panels               config.PanelConfig `json:"panels"`
+}
+
 var (
 	history        []HistoryPoint
 	histMu         sync.Mutex
@@ -50,30 +68,97 @@ var (
 	hostStore      = map[string]*hostData{}
 	hostStoreMu    sync.RWMutex
 	pollHTTPClient = &http.Client{Timeout: 3 * time.Second}
+
+	metricSt   *metricstore.Store
+	metricOnce sync.Once
 )
 
 func recordHistory() {
 	for {
 		snap, err := collector.GetSnapshot()
 		if err == nil {
-			histMu.Lock()
-			history = append(history, HistoryPoint{
-				Time:        time.Now().Unix(),
+			ts := time.Now().Unix()
+			pt := HistoryPoint{
+				Time:        ts,
 				CPUPercent:  snap.CPUPercent,
 				MemPercent:  snap.MemPercent,
 				DiskPercent: snap.DiskPercent,
-			})
+			}
+			histMu.Lock()
+			history = append(history, pt)
 			if len(history) > 60 {
 				history = history[len(history)-60:]
 			}
 			histMu.Unlock()
+			if metricSt != nil {
+				_ = metricSt.Insert("local", metricstore.Point{
+					Time:        pt.Time,
+					CPUPercent:  pt.CPUPercent,
+					MemPercent:  pt.MemPercent,
+					DiskPercent: pt.DiskPercent,
+				})
+			}
 		}
 		time.Sleep(2 * time.Second)
 	}
 }
 
+func ensureMetricStore() {
+	metricOnce.Do(func() {
+		cfg, err := config.Load()
+		if err != nil {
+			fmt.Printf("metricstore: config error: %v\n", err)
+			return
+		}
+		if !cfg.History.Enabled {
+			return
+		}
+		path := strings.TrimSpace(cfg.History.DBPath)
+		if path == "" {
+			path = "sysix-history.db"
+		}
+		if strings.Contains(path, "..") {
+			fmt.Printf("metricstore: db_path must not contain '..'\n")
+			return
+		}
+		st, err := metricstore.Open(path, cfg.History.RetentionDays, cfg.History.APIPoints)
+		if err != nil {
+			fmt.Printf("metricstore: disabled (%v)\n", err)
+			return
+		}
+		metricSt = st
+	})
+}
+
+func historyLimit(r *http.Request) int {
+	lim := 60
+	if cfg, err := config.Load(); err == nil && cfg.History.APIPoints > 0 {
+		lim = cfg.History.APIPoints
+	}
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if n, err := strconv.Atoi(q); err == nil && n >= 2 && n <= 500 {
+			lim = n
+		}
+	}
+	return lim
+}
+
+func historyFromPoints(pts []metricstore.Point) []HistoryPoint {
+	out := make([]HistoryPoint, len(pts))
+	for i, p := range pts {
+		out[i] = HistoryPoint{
+			Time:        p.Time,
+			CPUPercent:  p.CPUPercent,
+			MemPercent:  p.MemPercent,
+			DiskPercent: p.DiskPercent,
+		}
+	}
+	return out
+}
+
 func Start(port int) error {
 	observerMode = false
+	ensureMetricStore()
 	go recordHistory()
 	mux := newMux()
 	addr := fmt.Sprintf(":%d", port)
@@ -83,6 +168,7 @@ func Start(port int) error {
 
 func StartObserver(port int, targets []AgentTarget, pollInterval time.Duration) error {
 	observerMode = true
+	ensureMetricStore()
 	if pollInterval <= 0 {
 		pollInterval = 2 * time.Second
 	}
@@ -97,12 +183,87 @@ func newMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleIndex)
 	mux.HandleFunc("/api/hosts", handleHosts)
+	mux.HandleFunc("/api/config", handleConfig)
 	mux.HandleFunc("/api/snapshot", handleSnapshot)
 	mux.HandleFunc("/api/ports", handlePorts)
 	mux.HandleFunc("/api/network", handleNetwork)
 	mux.HandleFunc("/api/history", handleHistory)
 	mux.HandleFunc("/api/analysis", handleAnalysis)
 	return mux
+}
+
+func handleConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		cfg, err := config.Load()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp := quickSettings{
+			RefreshRate:          cfg.RefreshRate,
+			WebEnabled:           cfg.Web.Enabled,
+			WebPort:              cfg.Web.Port,
+			AgentEnabled:         cfg.Agent.Enabled,
+			AgentPort:            cfg.Agent.Port,
+			ObserverEnabled:      cfg.Observer.Enabled,
+			ObserverPollInterval: cfg.Observer.PollInterval,
+			HistoryEnabled:       cfg.History.Enabled,
+			HistoryDBPath:        cfg.History.DBPath,
+			HistoryRetentionDays: cfg.History.RetentionDays,
+			HistoryAPIPoints:     cfg.History.APIPoints,
+			Panels:               cfg.Panels,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	case http.MethodPost:
+		var in quickSettings
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		cfg, err := config.Load()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if in.RefreshRate > 0 {
+			cfg.RefreshRate = in.RefreshRate
+		}
+		if in.WebPort > 0 {
+			cfg.Web.Port = in.WebPort
+		}
+		if in.AgentPort > 0 {
+			cfg.Agent.Port = in.AgentPort
+		}
+		if in.ObserverPollInterval > 0 {
+			cfg.Observer.PollInterval = in.ObserverPollInterval
+		}
+		cfg.Web.Enabled = in.WebEnabled
+		cfg.Agent.Enabled = in.AgentEnabled
+		cfg.Observer.Enabled = in.ObserverEnabled
+		cfg.Panels = in.Panels
+		cfg.History.Enabled = in.HistoryEnabled
+		if in.HistoryDBPath != "" {
+			if !strings.Contains(in.HistoryDBPath, "..") {
+				cfg.History.DBPath = in.HistoryDBPath
+			}
+		}
+		if in.HistoryRetentionDays > 0 {
+			cfg.History.RetentionDays = in.HistoryRetentionDays
+		}
+		if in.HistoryAPIPoints > 0 {
+			cfg.History.APIPoints = in.HistoryAPIPoints
+		}
+		if err := config.Save(cfg); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -154,14 +315,24 @@ func upsertHost(id, name, source string, snapshot *collector.SystemSnapshot, net
 	h.Network = network
 	h.Ports = ports
 	if snapshot != nil {
-		h.History = append(h.History, HistoryPoint{
-			Time:        time.Now().Unix(),
+		ts := time.Now().Unix()
+		pt := HistoryPoint{
+			Time:        ts,
 			CPUPercent:  snapshot.CPUPercent,
 			MemPercent:  snapshot.MemPercent,
 			DiskPercent: snapshot.DiskPercent,
-		})
+		}
+		h.History = append(h.History, pt)
 		if len(h.History) > 60 {
 			h.History = h.History[len(h.History)-60:]
+		}
+		if metricSt != nil {
+			_ = metricSt.Insert(id, metricstore.Point{
+				Time:        pt.Time,
+				CPUPercent:  pt.CPUPercent,
+				MemPercent:  pt.MemPercent,
+				DiskPercent: pt.DiskPercent,
+			})
 		}
 	}
 }
@@ -194,26 +365,56 @@ func handleHosts(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleHistory(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	if observerMode {
 		hostID := selectedHostID(r)
+		if metricSt != nil {
+			pts, err := metricSt.Recent(hostID, historyLimit(r))
+			if err == nil && len(pts) > 0 {
+				_ = json.NewEncoder(w).Encode(historyFromPoints(pts))
+				return
+			}
+		}
 		h, ok := getHost(hostID)
 		if !ok || len(h.History) == 0 {
 			http.Error(w, "host history not available", http.StatusServiceUnavailable)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(h.History)
 		return
 	}
+	if metricSt != nil {
+		pts, err := metricSt.Recent("local", historyLimit(r))
+		if err == nil && len(pts) > 0 {
+			_ = json.NewEncoder(w).Encode(historyFromPoints(pts))
+			return
+		}
+	}
 	histMu.Lock()
 	defer histMu.Unlock()
-	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(history)
 }
 
 func handleAnalysis(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	if observerMode {
 		hostID := selectedHostID(r)
+		if metricSt != nil {
+			pts, err := metricSt.Recent(hostID, historyLimit(r))
+			if err == nil && len(pts) >= 2 {
+				hist := make([]analyzer.HistoryPoint, len(pts))
+				for i, p := range pts {
+					hist[i] = analyzer.HistoryPoint{
+						CPUPercent:  p.CPUPercent,
+						MemPercent:  p.MemPercent,
+						DiskPercent: p.DiskPercent,
+					}
+				}
+				report := analyzer.Analyze(hist)
+				_ = json.NewEncoder(w).Encode(report)
+				return
+			}
+		}
 		h, ok := getHost(hostID)
 		if !ok || len(h.History) == 0 {
 			http.Error(w, "host history not available", http.StatusServiceUnavailable)
@@ -228,9 +429,24 @@ func handleAnalysis(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		report := analyzer.Analyze(hist)
-		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(report)
 		return
+	}
+	if metricSt != nil {
+		pts, err := metricSt.Recent("local", historyLimit(r))
+		if err == nil && len(pts) >= 2 {
+			hist := make([]analyzer.HistoryPoint, len(pts))
+			for i, p := range pts {
+				hist[i] = analyzer.HistoryPoint{
+					CPUPercent:  p.CPUPercent,
+					MemPercent:  p.MemPercent,
+					DiskPercent: p.DiskPercent,
+				}
+			}
+			report := analyzer.Analyze(hist)
+			_ = json.NewEncoder(w).Encode(report)
+			return
+		}
 	}
 	histMu.Lock()
 	hist := make([]analyzer.HistoryPoint, len(history))
@@ -244,7 +460,6 @@ func handleAnalysis(w http.ResponseWriter, r *http.Request) {
 	histMu.Unlock()
 
 	report := analyzer.Analyze(hist)
-	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(report)
 }
 
@@ -910,6 +1125,60 @@ const dashboard = `<!DOCTYPE html>
     background: var(--accent);
     border-radius: 2px;
   }
+
+  .settings-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 14px;
+  }
+
+  .settings-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .settings-input,
+  .settings-checkbox {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 6px 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+  }
+
+  .settings-checkbox {
+    width: auto;
+    align-self: flex-start;
+  }
+
+  .settings-actions {
+    margin-top: 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .settings-save {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--accent);
+    background: none;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 6px 12px;
+    cursor: pointer;
+  }
+
+  .settings-save:hover { opacity: 0.85; }
+
+  .settings-status {
+    font-size: 0.72rem;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
 </style>
 </head>
 <body>
@@ -1130,6 +1399,32 @@ const dashboard = `<!DOCTYPE html>
     <div class="page-header">Settings</div>
     <div class="card">
       <div class="settings-group">
+        <div class="settings-label">Quick Edit</div>
+        <div class="settings-grid">
+          <label class="settings-field"><span class="stat-label">Refresh Rate (s)</span><input id="cfg-refresh-rate" class="settings-input" type="number" min="1"></label>
+          <label class="settings-field"><span class="stat-label">Observer Poll (s)</span><input id="cfg-observer-poll" class="settings-input" type="number" min="1"></label>
+          <label class="settings-field"><span class="stat-label">Web Port</span><input id="cfg-web-port" class="settings-input" type="number" min="1"></label>
+          <label class="settings-field"><span class="stat-label">Agent Port</span><input id="cfg-agent-port" class="settings-input" type="number" min="1"></label>
+          <label class="settings-field"><span class="stat-label">Web Enabled</span><input id="cfg-web-enabled" class="settings-checkbox" type="checkbox"></label>
+          <label class="settings-field"><span class="stat-label">Agent Enabled</span><input id="cfg-agent-enabled" class="settings-checkbox" type="checkbox"></label>
+          <label class="settings-field"><span class="stat-label">Observer Enabled</span><input id="cfg-observer-enabled" class="settings-checkbox" type="checkbox"></label>
+          <label class="settings-field"><span class="stat-label">History Enabled</span><input id="cfg-history-enabled" class="settings-checkbox" type="checkbox"></label>
+          <label class="settings-field"><span class="stat-label">History DB File</span><input id="cfg-history-db" class="settings-input" type="text" placeholder="sysix-history.db"></label>
+          <label class="settings-field"><span class="stat-label">Retention (days)</span><input id="cfg-history-retention" class="settings-input" type="number" min="1"></label>
+          <label class="settings-field"><span class="stat-label">History Points (API)</span><input id="cfg-history-points" class="settings-input" type="number" min="2" max="500"></label>
+          <label class="settings-field"><span class="stat-label">Panel: System</span><input id="cfg-panel-system" class="settings-checkbox" type="checkbox"></label>
+          <label class="settings-field"><span class="stat-label">Panel: Processes</span><input id="cfg-panel-processes" class="settings-checkbox" type="checkbox"></label>
+          <label class="settings-field"><span class="stat-label">Panel: Ports</span><input id="cfg-panel-ports" class="settings-checkbox" type="checkbox"></label>
+          <label class="settings-field"><span class="stat-label">Panel: Network</span><input id="cfg-panel-network" class="settings-checkbox" type="checkbox"></label>
+        </div>
+        <div class="settings-actions">
+          <button class="settings-save" onclick="saveSettings()">Save Config</button>
+          <span id="cfg-status" class="settings-status">ready</span>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="settings-group">
         <div class="settings-label">About</div>
         <div class="stat-row"><span class="stat-label">Version</span><span class="stat-value">0.3</span></div>
         <div class="stat-row"><span class="stat-label">License</span><span class="stat-value">Apache 2.0</span></div>
@@ -1215,6 +1510,81 @@ function setBar(id, pct) {
 function navTo(page) {
   const btn = document.querySelector('[onclick*="showPage(\'' + page + '\'"]');
   if (btn) showPage(page, btn);
+}
+
+function cfgNum(id) {
+  const v = Number(document.getElementById(id).value);
+  return Number.isFinite(v) ? v : 0;
+}
+
+function setCfgStatus(msg, color) {
+  const el = document.getElementById('cfg-status');
+  if (!el) return;
+  el.textContent = msg;
+  if (color) el.style.color = color;
+}
+
+async function loadSettings() {
+  try {
+    const cfg = await fetch('/api/config').then(r => r.json());
+    document.getElementById('cfg-refresh-rate').value = cfg.refresh_rate || 2;
+    document.getElementById('cfg-observer-poll').value = cfg.observer_poll_interval || 2;
+    document.getElementById('cfg-web-port').value = cfg.web_port || 8080;
+    document.getElementById('cfg-agent-port').value = cfg.agent_port || 9090;
+    document.getElementById('cfg-web-enabled').checked = !!cfg.web_enabled;
+    document.getElementById('cfg-agent-enabled').checked = !!cfg.agent_enabled;
+    document.getElementById('cfg-observer-enabled').checked = !!cfg.observer_enabled;
+    document.getElementById('cfg-history-enabled').checked = cfg.history_enabled !== false;
+    document.getElementById('cfg-history-db').value = cfg.history_db_path || 'sysix-history.db';
+    document.getElementById('cfg-history-retention').value = cfg.history_retention_days || 7;
+    document.getElementById('cfg-history-points').value = cfg.history_api_points || 60;
+    const panels = cfg.panels || {};
+    document.getElementById('cfg-panel-system').checked = !!panels.system;
+    document.getElementById('cfg-panel-processes').checked = !!panels.processes;
+    document.getElementById('cfg-panel-ports').checked = !!panels.ports;
+    document.getElementById('cfg-panel-network').checked = !!panels.network;
+    setCfgStatus('loaded', 'var(--muted)');
+  } catch (e) {
+    console.error(e);
+    setCfgStatus('failed to load', 'var(--bad)');
+  }
+}
+
+async function saveSettings() {
+  try {
+    setCfgStatus('saving...', 'var(--muted)');
+    const body = {
+      refresh_rate: cfgNum('cfg-refresh-rate'),
+      observer_poll_interval: cfgNum('cfg-observer-poll'),
+      web_port: cfgNum('cfg-web-port'),
+      agent_port: cfgNum('cfg-agent-port'),
+      web_enabled: document.getElementById('cfg-web-enabled').checked,
+      agent_enabled: document.getElementById('cfg-agent-enabled').checked,
+      observer_enabled: document.getElementById('cfg-observer-enabled').checked,
+      history_enabled: document.getElementById('cfg-history-enabled').checked,
+      history_db_path: document.getElementById('cfg-history-db').value.trim(),
+      history_retention_days: cfgNum('cfg-history-retention'),
+      history_api_points: cfgNum('cfg-history-points'),
+      panels: {
+        system: document.getElementById('cfg-panel-system').checked,
+        processes: document.getElementById('cfg-panel-processes').checked,
+        ports: document.getElementById('cfg-panel-ports').checked,
+        network: document.getElementById('cfg-panel-network').checked,
+      },
+    };
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      throw new Error('save failed');
+    }
+    setCfgStatus('saved to config.yaml', 'var(--good)');
+  } catch (e) {
+    console.error(e);
+    setCfgStatus('save failed', 'var(--bad)');
+  }
 }
 
 const SUGGESTIONS = [
@@ -1475,6 +1845,7 @@ async function refreshSystem() {
 }
 
 loadHosts();
+loadSettings();
 refresh();
 refreshSystem();
 refreshAnalysis();
